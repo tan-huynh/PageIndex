@@ -2,13 +2,13 @@ import tiktoken
 import openai
 import logging
 import os
+import re
 from datetime import datetime
 import time
 import json
-import PyPDF2
+from pdf_oxide import PdfDocument
 import copy
 import asyncio
-import pymupdf
 from io import BytesIO
 from dotenv import load_dotenv
 load_dotenv()
@@ -245,26 +245,38 @@ def get_last_node(structure):
 
 
 def extract_text_from_pdf(pdf_path):
-    pdf_reader = PyPDF2.PdfReader(pdf_path)
-    ###return text not list 
-    text=""
-    for page_num in range(len(pdf_reader.pages)):
-        page = pdf_reader.pages[page_num]
-        text+=page.extract_text()
+    if isinstance(pdf_path, BytesIO):
+        doc = PdfDocument(pdf_path.read())
+        pdf_path.seek(0)
+    else:
+        doc = PdfDocument(pdf_path)
+    
+    text = ""
+    for page_num in range(doc.page_count()):
+        text += doc.extract_text(page_num)
     return text
 
 def get_pdf_title(pdf_path):
-    pdf_reader = PyPDF2.PdfReader(pdf_path)
-    meta = pdf_reader.metadata
-    title = meta.title if meta and meta.title else 'Untitled'
-    return title
+    # pdf_oxide doesn't expose standard metadata properties as easily,
+    # so we fallback to filename if possible
+    if isinstance(pdf_path, str):
+        return os.path.basename(pdf_path)
+    return 'Untitled'
 
 def get_text_of_pages(pdf_path, start_page, end_page, tag=True):
-    pdf_reader = PyPDF2.PdfReader(pdf_path)
+    if isinstance(pdf_path, BytesIO):
+        doc = PdfDocument(pdf_path.read())
+        pdf_path.seek(0)
+    else:
+        doc = PdfDocument(pdf_path)
+        
     text = ""
+    # Make sure we don't go out of bounds
+    page_count = doc.page_count()
+    end_page = min(end_page, page_count)
+    
     for page_num in range(start_page-1, end_page):
-        page = pdf_reader.pages[page_num]
-        page_text = page.extract_text()
+        page_text = doc.extract_text(page_num)
         if tag:
             text += f"<start_index_{page_num+1}>\n{page_text}\n<end_index_{page_num+1}>\n"
         else:
@@ -299,11 +311,10 @@ def get_pdf_name(pdf_path):
     if isinstance(pdf_path, str):
         pdf_name = os.path.basename(pdf_path)
     elif isinstance(pdf_path, BytesIO):
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        meta = pdf_reader.metadata
-        pdf_name = meta.title if meta and meta.title else 'Untitled'
-        pdf_name = sanitize_filename(pdf_name)
-    return pdf_name
+        # We can't rely on PyPDF2 metadata anymore, so use a default fallback
+        pdf_name = "Untitled_Stream"
+    
+    return sanitize_filename(pdf_name)
 
 
 class JsonLogger:
@@ -410,31 +421,22 @@ def add_preface_if_needed(data):
 
 
 
-def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="PyPDF2"):
+def get_page_tokens(pdf_path, model="gpt-4o-2024-11-20", pdf_parser="pdf_oxide"):
     enc = tiktoken.encoding_for_model(model)
-    if pdf_parser == "PyPDF2":
-        pdf_reader = PyPDF2.PdfReader(pdf_path)
-        page_list = []
-        for page_num in range(len(pdf_reader.pages)):
-            page = pdf_reader.pages[page_num]
-            page_text = page.extract_text()
-            token_length = len(enc.encode(page_text))
-            page_list.append((page_text, token_length))
-        return page_list
-    elif pdf_parser == "PyMuPDF":
-        if isinstance(pdf_path, BytesIO):
-            pdf_stream = pdf_path
-            doc = pymupdf.open(stream=pdf_stream, filetype="pdf")
-        elif isinstance(pdf_path, str) and os.path.isfile(pdf_path) and pdf_path.lower().endswith(".pdf"):
-            doc = pymupdf.open(pdf_path)
-        page_list = []
-        for page in doc:
-            page_text = page.get_text()
-            token_length = len(enc.encode(page_text))
-            page_list.append((page_text, token_length))
-        return page_list
+    
+    if isinstance(pdf_path, BytesIO):
+        doc = PdfDocument(pdf_path.read())
+        pdf_path.seek(0)
     else:
-        raise ValueError(f"Unsupported PDF parser: {pdf_parser}")
+        doc = PdfDocument(pdf_path)
+        
+    page_list = []
+    for page_num in range(doc.page_count()):
+        page_text = doc.extract_text(page_num)
+        token_length = len(enc.encode(page_text))
+        page_list.append((page_text, token_length))
+        
+    return page_list
 
         
 
@@ -451,9 +453,12 @@ def get_text_of_pdf_pages_with_labels(pdf_pages, start_page, end_page):
     return text
 
 def get_number_of_pages(pdf_path):
-    pdf_reader = PyPDF2.PdfReader(pdf_path)
-    num = len(pdf_reader.pages)
-    return num
+    if isinstance(pdf_path, BytesIO):
+        doc = PdfDocument(pdf_path.read())
+        pdf_path.seek(0)
+    else:
+        doc = PdfDocument(pdf_path)
+    return doc.page_count()
 
 
 
